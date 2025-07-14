@@ -1,0 +1,43 @@
+[package]
+name = "ps3-redump-downloader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# HTTP client and HTML parsing
+reqwest = { version = "0.12", features = ["json", "stream"] }
+scraper = "0.23"
+tokio = { version = "1.0", features = ["full"] }
+
+# File operations and compression
+zip = "0.6"
+
+# Configuration parsing
+configparser = "3.0"
+
+# Progress bars and UI
+indicatif = "0.18"
+
+# Error handling
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Cross-platform file opening
+open = "5.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Async runtime
+futures = "0.3"
+futures-util = "0.3"
+
+# For better command-line argument parsing
+clap = { version = "4.0", features = ["derive"] }
+
+# For better error handling
+thiserror = "2.0"
