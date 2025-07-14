@@ -57,33 +57,42 @@ impl Scraper {
         let html_content = response.text().await?;
         let document = Html::parse_document(&html_content);
 
-        // Selector for PS3 game links (adjust based on actual Redump PS3 page structure)
-        let link_selector = Selector::parse("a[href*='.zip']").unwrap();
+        // Selector for PS3 game links in the table structure
+        let row_selector = Selector::parse("tbody tr").unwrap();
+        let link_selector = Selector::parse("td.link a").unwrap();
+        let size_selector = Selector::parse("td.size").unwrap();
         let mut games = Vec::new();
 
-        for element in document.select(&link_selector) {
-            if let Some(href) = element.value().attr("href") {
-                let title = element.text().collect::<String>().trim().to_string();
-                
-                // Skip if title is empty or doesn't look like a PS3 game
-                if title.is_empty() || !title.contains("PS3") {
-                    continue;
+        for row in document.select(&row_selector) {
+            // Skip the parent directory row
+            if let Some(link_element) = row.select(&link_selector).next() {
+                if let Some(href) = link_element.value().attr("href") {
+                    let title = link_element.text().collect::<String>().trim().to_string();
+                    
+                    // Skip if title is empty or doesn't end with .zip
+                    if title.is_empty() || !title.ends_with(".zip") {
+                        continue;
+                    }
+
+                    // Extract size information from the size column
+                    let size = if let Some(size_element) = row.select(&size_selector).next() {
+                        size_element.text().collect::<String>().trim().to_string()
+                    } else {
+                        "Unknown size".to_string()
+                    };
+                    
+                    // Extract region information
+                    let region = self.extract_region_from_title(&title);
+
+                    let game = Game::new_ps3(
+                        title.clone(),
+                        href.to_string(),
+                        size,
+                        region,
+                    );
+
+                    games.push(game);
                 }
-
-                // Extract size information if available
-                let size = self.extract_size_from_title(&title);
-                
-                // Extract region information
-                let region = self.extract_region_from_title(&title);
-
-                let game = Game::new_ps3(
-                    title.clone(),
-                    href.to_string(),
-                    size,
-                    region,
-                );
-
-                games.push(game);
             }
         }
 
@@ -91,22 +100,6 @@ impl Scraper {
         games.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
 
         Ok(games)
-    }
-
-    /// Extracts size information from the game title.
-    fn extract_size_from_title(&self, title: &str) -> String {
-        // Look for size patterns like (4.2 GB), (2.1 GiB), etc.
-        if let Some(size_match) = title.find('(') {
-            if let Some(end_match) = title[size_match..].find(')') {
-                let size_text = &title[size_match + 1..size_match + end_match];
-                if size_text.contains("GB") || size_text.contains("GiB") || size_text.contains("MB") {
-                    return size_text.to_string();
-                }
-            }
-        }
-        
-        // Default size if not found
-        "Unknown size".to_string()
     }
 
     /// Extracts region information from the game title.

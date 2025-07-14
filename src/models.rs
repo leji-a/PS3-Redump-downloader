@@ -43,7 +43,7 @@ impl Game {
 
     /// Creates a new PS3 game
     pub fn new_ps3(title: String, link: String, size: String, region: Option<String>) -> Self {
-        let mut game = Self {
+        let game = Self {
             title,
             link,
             size,
@@ -71,8 +71,32 @@ impl Game {
 
     /// Gets the game identifier for key lookup
     pub fn get_game_id(&self) -> String {
-        // Extract game ID from title or link
-        // This might need adjustment based on actual PS3 game naming conventions
-        self.clean_title().to_uppercase().replace(" ", "_")
+        // Use the clean title as the game ID to match the key lookup format
+        self.clean_title()
+    }
+
+    /// Returns the output ISO filename in the format regioncode-nameofgame.iso
+    pub fn output_iso_filename(&self) -> String {
+        let clean = self.clean_title();
+        // Split at the first space or dash to get region code
+        let mut parts = clean.splitn(2, |c: char| c == ' ' || c == '-');
+        let region = parts.next().unwrap_or("").to_lowercase();
+        let rest = parts.next().unwrap_or("").trim();
+        // Extract main game name (up to first parenthesis or end)
+        let main_name = rest
+            .split('(')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .replace([' ', '-', ',', ':', ';', '\'', '"'], "_")
+            .replace("__", "_")
+            .trim_matches('_')
+            .to_lowercase();
+        if !region.is_empty() && !main_name.is_empty() {
+            format!("{}-{}.iso", region, main_name)
+        } else {
+            // fallback to cleaned title
+            format!("{}.iso", clean.replace([' ', '-', '(', ')', ','], "_").to_lowercase())
+        }
     }
 }

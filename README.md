@@ -7,7 +7,7 @@ A fast and efficient Rust application for downloading PlayStation 3 games from R
 1. [Features](#features)
 2. [Prerequisites](#prerequisites)
 3. [Installation](#installation)
-4. [PS3 Decryption Setup](#ps3-decryption-setup)
+4. [PS3Dec Usage](#ps3dec-usage)
 5. [Usage](#usage)
 6. [Configuration](#configuration)
 7. [Troubleshooting](#troubleshooting)
@@ -21,17 +21,17 @@ A fast and efficient Rust application for downloading PlayStation 3 games from R
 - 📊 **Progress Indicators**: Visual progress bars for downloads, extraction, and decryption
 - 🗜️ **Auto-Extraction**: Automatically extracts ZIP files to encrypted ISO format
 - 🔑 **Auto-Key Management**: Automatically downloads and manages PS3 decryption keys
-- 🔓 **Auto-Decryption**: Automatically decrypts PS3 ISOs using the C decryption binary and keys
+- 🔓 **Auto-Decryption**: Automatically decrypts PS3 ISOs using PS3Dec and keys
 - 🔧 **Configurable**: Customizable timeouts, retries, and folder paths
 - 🌐 **Cross-Platform**: Works on Windows, macOS, and Linux
-- ⚡ **High Performance**: Built in Rust for optimal speed and memory efficiency
 
 ## Prerequisites
 
 - **Rust** (1.70 or higher)
 - **Internet connection** for downloading games and keys
 - **Sufficient disk space** for PS3 ISO files (typically 4-50GB per game)
-- **PS3 Decryption Binary**: C program for decrypting PS3 ISOs
+- **Build tools**: CMake, GCC/G++, Make
+- **PS3Dec**: C program for decrypting PS3 ISOs (included in decryptor/PS3Dec/)
 
 ### Installing Rust
 
@@ -44,14 +44,13 @@ A fast and efficient Rust application for downloading PlayStation 3 games from R
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
-
 ## Installation
 
 ### From Source
 
 1. **Clone and build**:
    ```bash
-   git clone https://github.com/yourusername/ps3-redump-downloader.git
+   git clone https://github.com/leji-a/ps3-redump-downloader.git
    cd ps3-redump-downloader
    cargo build --release
    ```
@@ -87,25 +86,12 @@ cargo build --release --target x86_64-pc-windows-gnu
 cargo build --release --target x86_64-apple-darwin
 ```
 
-## PS3 Decryption Setup
+## PS3Dec Usage
 
-**IMPORTANT**: This tool requires a C decryption binary to decrypt PS3 ISOs. You need to:
-
-1. **Obtain the PS3 decryption C source code** (not included in this repository)
-2. **Compile the C binary**:
-   ```bash
-   gcc -o ps3_decryptor ps3_decryptor.c
-   ```
-3. **Make it executable** (Unix-like systems):
-   ```bash
-   chmod +x ps3_decryptor
-   ```
-4. **Place the binary** in the same directory as the Rust application
-
-The decryption binary should accept three arguments:
-- Input file (encrypted PS3 ISO)
-- Output file (decrypted PS3 ISO)
-- Decryption key (32-character hex string)
+PS3Dec supports multiple key types:
+- **3k3y**: Self-contained encrypted images
+- **d1**: Raw D1 keys that need processing  
+- **key**: Direct decryption keys (what we use)
 
 ## Usage
 
@@ -227,8 +213,8 @@ TMP_FOLDER_NAME = ~/PS3-Games
 TMP_ISO_FOLDER_NAME = iso_files
 
 [PS3]
-# Path to the PS3 decryption binary
-DECRYPTOR_PATH = ./ps3_decryptor
+# Path to the PS3Dec binary (built from decryptor/PS3Dec)
+DECRYPTOR_PATH = ./decryptor/PS3Dec/build/Release/PS3Dec
 # Timeout for decryption process (seconds)
 DECRYPTION_TIMEOUT = 300
 ```
@@ -245,7 +231,7 @@ DECRYPTION_TIMEOUT = 300
 | `TIMEOUT_REQUEST` | Request timeout in seconds | 1800 (30 minutes) |
 | `TMP_FOLDER_NAME` | Temporary folder name | ~/PS3-Games |
 | `TMP_ISO_FOLDER_NAME` | ISO files folder name | iso_files |
-| `DECRYPTOR_PATH` | Path to PS3 decryption binary | ./ps3_decryptor |
+| `DECRYPTOR_PATH` | Path to PS3Dec binary | ./decryptor/PS3Dec/build/Release/PS3Dec |
 | `DECRYPTION_TIMEOUT` | Decryption timeout in seconds | 300 (5 minutes) |
 
 ## File Structure
@@ -253,9 +239,13 @@ DECRYPTION_TIMEOUT = 300
 ```
 ps3-redump-downloader/
 ├── src/                    # Source code
+├── decryptor/              # PS3Dec C program
+│   └── PS3Dec/            # PS3Dec source code
+│       ├── src/           # C source files
+│       ├── build/         # Build directory
+│       │   └── Release/   # Built PS3Dec binary
+│       └── CMakeLists.txt # Build configuration
 ├── config.ini             # Configuration file
-├── ps3_decryptor.c        # C decryption source (not included)
-├── ps3_decryptor          # Compiled C binary (not included)
 ├── Cargo.toml            # Rust dependencies
 └── README.md             # This file
 
@@ -271,12 +261,20 @@ ps3-redump-downloader/
 
 ### Common Issues
 
-#### PS3 Decryption Binary Not Found
-- **Problem**: "PS3 decryption binary not found" error
+#### PS3Dec Binary Not Found
+- **Problem**: "PS3Dec binary not found" error
 - **Solution**: 
-  - Ensure the C decryption binary is compiled and placed in the correct location
+  - Build PS3Dec: `cd decryptor/PS3Dec && mkdir -p build && cd build && cmake .. && make`
   - Check the `DECRYPTOR_PATH` setting in `config.ini`
-  - Make the binary executable: `chmod +x ps3_decryptor`
+  - Make the binary executable: `chmod +x decryptor/PS3Dec/build/Release/PS3Dec`
+
+#### PS3Dec Build Failures
+- **Problem**: CMake or make fails
+- **Solution**: 
+  - Install build dependencies: `sudo dnf install cmake gcc-c++ make`
+  - Ensure you have OpenMP support: `sudo dnf install libomp-devel`
+  - On macOS: `brew install libomp`
+  - Initialize git submodules: `git submodule update --init --recursive`
 
 #### Decryption Key Not Found
 - **Problem**: "Could not find decryption key for game" error
@@ -324,11 +322,19 @@ ps3-redump-downloader/
 1. **Install Rust** (see Prerequisites)
 2. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/ps3-redump-downloader.git
+   git clone https://github.com/leji-a/ps3-redump-downloader.git
    cd ps3-redump-downloader
    ```
 
-3. **Install dependencies**:
+3. **Build PS3Dec**:
+   ```bash
+   cd decryptor/PS3Dec
+   mkdir -p build && cd build
+   cmake .. && make
+   chmod +x Release/PS3Dec
+   ```
+
+4. **Install Rust dependencies**:
    ```bash
    cargo build
    ```
@@ -343,7 +349,7 @@ The application uses these main dependencies:
 - `tokio` - Async runtime
 - `zip` - ZIP file extraction
 - `configparser` - Configuration file parsing
-- `tokio-process` - Subprocess execution for decryption
+- `tokio::process` - Subprocess execution for decryption
 
 ## Contributing
 
@@ -352,12 +358,6 @@ The application uses these main dependencies:
 3. Commit your changes (`git commit -m 'Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
-
-## Acknowledgments
-
-- **Redump** for providing the PS3 game database and decryption keys
-- **Myrient** for hosting the game files and keys
-- **PS3 Decryption Community** for the C decryption tools
 
 ## Disclaimer
 
@@ -377,4 +377,4 @@ If you encounter issues:
 
 ---
 
-**Note**: This is a Rust implementation specifically designed for PS3 games with automatic key management and decryption support.
+Note: This is a Rust port of the original Python [PS3 Redump downloader](https://github.com/juanpomares/PS3-Redump-downloader).

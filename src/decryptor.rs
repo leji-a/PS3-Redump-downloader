@@ -4,7 +4,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use tokio::process::Command;
 
-/// Decryptor handles PS3 ISO decryption using the C binary and keys.
+/// Decryptor handles PS3 ISO decryption using the PS3Dec C binary and keys.
 pub struct Decryptor {
     config: Config,
     key_manager: KeyManager,
@@ -19,73 +19,124 @@ impl Decryptor {
         }
     }
 
-    /// Decrypts a PS3 ISO file using the C decryption binary and key.
+    /// Decrypts a PS3 ISO file using the PS3Dec C binary and key.
     pub async fn decrypt_iso(&self, encrypted_path: &Path, decrypted_path: &Path, key: &str) -> Result<()> {
+        use std::fs;
+        use std::time::Duration;
+        use tokio::time::sleep;
+
         let decryptor_path = self.config.decryptor_path();
         
         // Check if decryption binary exists
         if !decryptor_path.exists() {
             anyhow::bail!(
-                "PS3 decryption binary not found at: {}. Please ensure the C decryption binary is compiled and available.",
+                "PS3Dec binary not found at: {}. Please build the PS3Dec program first:\n\
+                 cd decryptor/PS3Dec && mkdir -p build && cd build && cmake .. && make",
                 decryptor_path.display()
             );
+        }
+
+        let input_size = fs::metadata(encrypted_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if input_size == 0 {
+            anyhow::bail!("Encrypted ISO file is empty or missing: {}", encrypted_path.display());
         }
 
         println!("Decrypting PS3 ISO file with key...");
 
         // Create progress bar for decryption
-        let progress_bar = ProgressBar::new_spinner();
+        let progress_bar = ProgressBar::new(input_size);
         progress_bar.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} Decrypting PS3 ISO... {elapsed_precise}")
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
                 .unwrap()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+                .progress_chars("#>-")
         );
 
-        // Build command for decryption with key
+        // Build command for PS3Dec: PS3Dec d key <key> <input> <output>
         let mut command = Command::new(&decryptor_path);
-        command.arg(encrypted_path);
-        command.arg(decrypted_path);
-        command.arg(key); // Add the key as a third argument
+        command.arg("d");           // decrypt mode
+        command.arg("key");         // key type (direct key)
+        command.arg(key);            // 32-character hex key
+        command.arg(encrypted_path); // input file
+        command.arg(decrypted_path); // output file
 
-        // Set timeout for decryption process
-        let timeout_duration = std::time::Duration::from_secs(self.config.decryption_timeout);
+        // Start the decryption process
+        let mut child = command.spawn()?;
+        let timeout_duration = Duration::from_secs(self.config.decryption_timeout);
+        let poll_interval = Duration::from_millis(500);
+        let mut last_size = 0;
+        let mut stalled_count = 0;
+        let max_stalled = 20; // 10 seconds
+        let start_time = std::time::Instant::now();
 
-        // Execute decryption with timeout
-        let result = tokio::time::timeout(timeout_duration, async {
-            let output = command.output().await?;
-            
-            if output.status.success() {
-                Ok(())
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("Decryption failed: {}", stderr);
-            }
-        }).await;
-
-        progress_bar.finish_with_message("Decryption completed");
-
-        match result {
-            Ok(Ok(())) => {
-                println!("PS3 ISO decryption completed successfully");
-                Ok(())
-            }
-            Ok(Err(e)) => {
-                anyhow::bail!("Decryption error: {}", e);
-            }
-            Err(_) => {
-                anyhow::bail!("Decryption timed out after {} seconds", self.config.decryption_timeout);
+        // Progress bar loop
+        loop {
+            // Check if process has exited
+            match child.try_wait()? {
+                Some(status) => {
+                    // Final update
+                    if decrypted_path.exists() {
+                        let final_size = fs::metadata(decrypted_path).map(|m| m.len()).unwrap_or(0);
+                        progress_bar.set_position(final_size.min(input_size));
+                    }
+                    if status.success() {
+                        progress_bar.finish_with_message("Decryption completed");
+                        break;
+                    } else {
+                        progress_bar.abandon_with_message("Decryption failed");
+                        let stderr = status.code().map(|c| format!("Exit code: {}", c)).unwrap_or_else(|| "Unknown error".to_string());
+                        anyhow::bail!("PS3Dec failed: {}", stderr);
+                    }
+                }
+                None => {
+                    // Process is still running
+                    if decrypted_path.exists() {
+                        let size = fs::metadata(decrypted_path).map(|m| m.len()).unwrap_or(0);
+                        progress_bar.set_position(size.min(input_size));
+                        if size == last_size {
+                            stalled_count += 1;
+                        } else {
+                            stalled_count = 0;
+                        }
+                        last_size = size;
+                        if stalled_count > max_stalled {
+                            progress_bar.println("Warning: Decryption appears stalled. Output file size is not growing.");
+                        }
+                    }
+                    if start_time.elapsed() > timeout_duration {
+                        progress_bar.abandon_with_message("Decryption timed out");
+                        let _ = child.kill().await;
+                        anyhow::bail!("Decryption timed out after {} seconds", self.config.decryption_timeout);
+                    }
+                    sleep(poll_interval).await;
+                }
             }
         }
+
+        // Final error check
+        if decrypted_path.exists() {
+            let final_size = fs::metadata(decrypted_path).map(|m| m.len()).unwrap_or(0);
+            if final_size < input_size / 2 {
+                progress_bar.println("Warning: Decrypted file is much smaller than the input. Decryption may have failed.");
+            }
+        } else {
+            anyhow::bail!("Decryption failed: Output file was not created.");
+        }
+
+        println!("PS3 ISO decryption completed successfully");
+        Ok(())
     }
 
-    /// Validates that the decryption binary is available and executable.
+    /// Validates that the PS3Dec binary is available and executable.
     pub fn validate_decryptor(&self) -> Result<()> {
         let decryptor_path = self.config.decryptor_path();
         
         if !decryptor_path.exists() {
             anyhow::bail!(
-                "PS3 decryption binary not found at: {}. Please compile the C decryption binary first.",
+                "PS3Dec binary not found at: {}. Please build the PS3Dec program first:\n\
+                 cd decryptor/PS3Dec && mkdir -p build && cd build && cmake .. && make",
                 decryptor_path.display()
             );
         }
@@ -97,7 +148,7 @@ impl Decryptor {
             if let Ok(metadata) = std::fs::metadata(&decryptor_path) {
                 if metadata.permissions().mode() & 0o111 == 0 {
                     anyhow::bail!(
-                        "PS3 decryption binary is not executable: {}. Please make it executable with 'chmod +x {}'",
+                        "PS3Dec binary is not executable: {}. Please make it executable with 'chmod +x {}'",
                         decryptor_path.display(),
                         decryptor_path.display()
                     );
@@ -111,11 +162,5 @@ impl Decryptor {
     /// Gets the key manager for accessing keys.
     pub fn key_manager(&self) -> &KeyManager {
         &self.key_manager
-    }
-
-    /// Gets the size of the encrypted file for progress estimation.
-    fn get_file_size(&self, path: &Path) -> Result<u64> {
-        let metadata = std::fs::metadata(path)?;
-        Ok(metadata.len())
     }
 } 

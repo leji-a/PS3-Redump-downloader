@@ -45,14 +45,14 @@ impl Downloader {
 
         // Construct the full URL by combining base URL with relative path
         let full_url = format!("{}{}", self.config.ps3_iso_url, game.link);
-        self.download_extract_and_decrypt(&full_url, &title, &key).await?;
+        self.download_extract_and_decrypt(&full_url, game, &key).await?;
         println!("\n{} downloaded and decrypted :)", title);
 
         // Open the folder containing the decrypted ISO
         let decrypted_iso_file = self
             .config
             .tmp_iso_folder_path()
-            .join(format!("{}.iso", title));
+            .join(game.output_iso_filename());
         if decrypted_iso_file.exists() {
             self.open_explorer(&decrypted_iso_file);
         }
@@ -61,10 +61,10 @@ impl Downloader {
     }
 
     /// Download, extract, and decrypt the file, handling both direct and external download methods.
-    async fn download_extract_and_decrypt(&self, link: &str, title: &str, key: &str) -> Result<()> {
+    async fn download_extract_and_decrypt(&self, link: &str, game: &Game, key: &str) -> Result<()> {
         println!(" # PS3 ISO file...");
 
-        let decrypted_file_name = format!("{}.iso", title);
+        let decrypted_file_name = game.output_iso_filename();
         let decrypted_file_path = self.config.tmp_iso_folder_path().join(&decrypted_file_name);
 
         // Skip download if file already exists
@@ -73,9 +73,9 @@ impl Downloader {
             return Ok(());
         }
 
-        let new_file_name = format!("{}.zip", title);
+        let new_file_name = format!("{}.zip", game.clean_title());
         let tmp_file = self.config.tmp_iso_folder_path().join(&new_file_name);
-        let encrypted_file_name = format!("{}_encrypted.iso", title);
+        let encrypted_file_name = format!("{}_encrypted.iso", game.clean_title());
         let encrypted_file_path = self.config.tmp_iso_folder_path().join(&encrypted_file_name);
 
         if self.config.external_iso_download {
@@ -89,6 +89,26 @@ impl Downloader {
         if tmp_file.exists() {
             self.unzip_file(&tmp_file).await?;
             self.remove_file(&tmp_file)?;
+
+            // After extraction, find the ISO and rename it to regioncode-nameofgame_encrypted.iso
+            use std::fs;
+            use std::ffi::OsStr;
+            let dest = self.config.tmp_iso_folder_path();
+            let expected_encrypted = dest.join(format!("{}_encrypted.iso", game.output_iso_filename().trim_end_matches(".iso")));
+            // Find the first .iso file in the folder (should be the extracted one)
+            if let Ok(entries) = fs::read_dir(&dest) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension() == Some(OsStr::new("iso")) && !path.file_name().unwrap_or_default().to_string_lossy().contains("encrypted") {
+                        // Rename to the expected encrypted name
+                        if path != expected_encrypted {
+                            println!("Renaming extracted ISO: {:?} -> {:?}", path, expected_encrypted);
+                            let _ = fs::rename(&path, &expected_encrypted);
+                        }
+                        break;
+                    }
+                }
+            }
         }
 
         // Decrypt the extracted ISO with the key
@@ -144,6 +164,8 @@ impl Downloader {
                             .open(file_path)
                             .await?;
                         file.seek(SeekFrom::Start(first_byte)).await?;
+                        
+                        // Use the new streaming API for reqwest 0.12
                         let mut stream = response.bytes_stream();
 
                         let progress_bar = if let Some(total) = total_size {
@@ -162,6 +184,7 @@ impl Downloader {
 
                         let mut downloaded = first_byte;
                         let mut error_occurred = false;
+                        
                         while let Some(chunk_result) = stream.next().await {
                             match chunk_result {
                                 Ok(chunk) => {
