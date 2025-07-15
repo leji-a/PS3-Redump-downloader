@@ -144,6 +144,24 @@ impl Downloader {
                 headers.insert("Range", format!("bytes={}-{}", first_byte, size - 1).parse()?);
             }
 
+            // Print the message before creating the progress bar
+            println!("Attempting download from: {}", link);
+            std::io::stdout().flush().ok();
+            let progress_bar = if let Some(total) = total_size {
+                let pb = ProgressBar::new(total);
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                        .unwrap()
+                        .progress_chars("#>-")
+                );
+                pb.set_draw_target(indicatif::ProgressDrawTarget::stdout());
+                std::io::stdout().flush().ok();
+                Some(pb)
+            } else {
+                None
+            };
+
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(
                     self.config.timeout_request.unwrap_or(1800), // Longer timeout for PS3 files
@@ -151,8 +169,6 @@ impl Downloader {
                 .connect_timeout(std::time::Duration::from_secs(30))
                 .build()?;
 
-            println!("Attempting download from: {}", link);
-            
             match client.get(link).headers(headers).send().await {
                 Ok(response) => {
                     if response.status().is_success() {
@@ -164,27 +180,11 @@ impl Downloader {
                             .open(file_path)
                             .await?;
                         file.seek(SeekFrom::Start(first_byte)).await?;
-                        
                         // Use the new streaming API for reqwest 0.12
                         let mut stream = response.bytes_stream();
 
-                        let progress_bar = if let Some(total) = total_size {
-                            let pb = ProgressBar::new(total);
-                            pb.set_style(
-                                ProgressStyle::default_bar()
-                                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-                                    .unwrap()
-                                    .progress_chars("#>-")
-                            );
-                            pb.set_position(first_byte);
-                            Some(pb)
-                        } else {
-                            None
-                        };
-
                         let mut downloaded = first_byte;
                         let mut error_occurred = false;
-                        
                         while let Some(chunk_result) = stream.next().await {
                             match chunk_result {
                                 Ok(chunk) => {
@@ -195,13 +195,31 @@ impl Downloader {
                                     }
                                 }
                                 Err(e) => {
-                                    println!("Error during download: {}", e);
+                                    if let Some(pb) = &progress_bar {
+                                        pb.println(format!("Error during download: {}", e));
+                                    } else {
+                                        println!("Error during download: {}", e);
+                                    }
                                     error_occurred = true;
                                     break;
                                 }
                             }
                         }
-
+                        if let Some(pb) = &progress_bar {
+                            if let Some(length) = pb.length() {
+                                if pb.position() >= length {
+                                    pb.finish_with_message("Download completed");
+                                } else {
+                                    pb.finish_with_message("Download incomplete");
+                                }
+                            } else {
+                                pb.finish_with_message("Download completed");
+                            }
+                        }
+                        std::io::stdout().flush().ok();
+                        if let Some(pb) = progress_bar {
+                            drop(pb);
+                        }
                         if error_occurred {
                             retries += 1;
                             if retries < self.config.max_retries {
@@ -213,23 +231,7 @@ impl Downloader {
                             }
                             continue;
                         }
-
-                        // Check if download was completed successfully
-                        if let Some(pb) = &progress_bar {
-                            if let Some(length) = pb.length() {
-                                if pb.position() >= length {
-                                    pb.finish_with_message("Download completed");
-                                    break;
-                                } else {
-                                    pb.finish_with_message("Download incomplete");
-                                }
-                            } else {
-                                pb.finish_with_message("Download completed");
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
+                        break;
                     } else {
                         println!("HTTP error: {} - {}", response.status(), response.status().as_str());
                         retries += 1;
@@ -241,14 +243,12 @@ impl Downloader {
                 }
             }
         }
-
         if retries == self.config.max_retries {
             anyhow::bail!(
                 "Failed to download file after {} attempts.",
                 self.config.max_retries
             );
         }
-
         Ok(())
     }
 
@@ -326,15 +326,14 @@ impl Downloader {
 
     /// Unzips the downloaded file, showing a progress bar if possible.
     async fn unzip_file(&self, zip_path: &Path) -> Result<()> {
+        use indicatif::ProgressDrawTarget;
         println!("Extracting ZIP file...");
+        std::io::stdout().flush().ok();
         let dest = zip_path.parent().unwrap();
-        
-        // Check file size first
         let file_size = fs::metadata(zip_path)?.len();
         if file_size == 0 {
             anyhow::bail!("ZIP file is empty (0 bytes)");
         }
-        
         let file = fs::File::open(zip_path)?;
         let mut archive = match ZipArchive::new(file) {
             Ok(archive) => archive,
@@ -342,21 +341,19 @@ impl Downloader {
                 anyhow::bail!("Invalid ZIP archive: {}. The file may be corrupted or incomplete. Try downloading again.", e);
             }
         };
-
-        // Calculate total size first
-        let total_size: u64 = {
-            let file_names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
-            file_names
-                .iter()
-                .filter_map(|name| {
-                    archive
-                        .by_name(name)
-                        .ok()
-                        .and_then(|file| file.size().checked_add(0))
-                })
-                .sum()
-        };
-
+        let total_files = archive.len();
+        let mut total_size: u64 = 0;
+        let mut file_sizes = Vec::with_capacity(total_files);
+        for i in 0..total_files {
+            if let Ok(file) = archive.by_index(i) {
+                let size = file.size();
+                total_size += size;
+                file_sizes.push(size);
+            } else {
+                file_sizes.push(0);
+            }
+        }
+        std::io::stdout().flush().ok();
         if total_size > 0 {
             let progress_bar = ProgressBar::new(total_size);
             progress_bar.set_style(
@@ -365,11 +362,12 @@ impl Downloader {
                     .unwrap()
                     .progress_chars("#>-")
             );
-
+            progress_bar.set_draw_target(ProgressDrawTarget::stdout());
+            progress_bar.tick();
+            std::io::stdout().flush().ok();
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i)?;
                 let outpath = dest.join(file.name());
-
                 if file.name().ends_with('/') {
                     fs::create_dir_all(&outpath)?;
                 } else {
@@ -390,22 +388,23 @@ impl Downloader {
                     }
                 }
             }
-
             progress_bar.finish_with_message("Extraction completed");
+            std::io::stdout().flush().ok();
         } else {
-            // Fallback spinner for small files or when size calculation fails
-            let spinner = ProgressBar::new_spinner();
-            spinner.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.green} Extracting files... {elapsed_precise}")
+            // Always show a progress bar based on file count if size is unknown
+            let progress_bar = ProgressBar::new(total_files as u64);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} Extracting: [{bar:40.cyan/blue}] {pos}/{len} files ({eta})")
                     .unwrap()
-                    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+                    .progress_chars("#>-")
             );
-
+            progress_bar.set_draw_target(ProgressDrawTarget::stdout());
+            progress_bar.tick();
+            std::io::stdout().flush().ok();
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i)?;
                 let outpath = dest.join(file.name());
-
                 if file.name().ends_with('/') {
                     fs::create_dir_all(&outpath)?;
                 } else {
@@ -424,12 +423,11 @@ impl Downloader {
                         outfile.write_all(&buffer[..bytes_read])?;
                     }
                 }
-                spinner.tick();
+                progress_bar.inc(1);
             }
-
-            spinner.finish_with_message("Extraction completed");
+            progress_bar.finish_with_message("Extraction completed");
+            std::io::stdout().flush().ok();
         }
-
         Ok(())
     }
 

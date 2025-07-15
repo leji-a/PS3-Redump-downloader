@@ -3,6 +3,7 @@ use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use tokio::process::Command;
+use std::io::Write;
 
 /// Decryptor handles PS3 ISO decryption using the PS3Dec C binary and keys.
 pub struct Decryptor {
@@ -24,6 +25,7 @@ impl Decryptor {
         use std::fs;
         use std::time::Duration;
         use tokio::time::sleep;
+        use indicatif::ProgressDrawTarget;
 
         let decryptor_path = self.config.decryptor_path();
         
@@ -44,7 +46,7 @@ impl Decryptor {
         }
 
         println!("Decrypting PS3 ISO file with key...");
-
+        std::io::stdout().flush().ok();
         // Create progress bar for decryption
         let progress_bar = ProgressBar::new(input_size);
         progress_bar.set_style(
@@ -53,6 +55,9 @@ impl Decryptor {
                 .unwrap()
                 .progress_chars("#>-")
         );
+        progress_bar.set_draw_target(ProgressDrawTarget::stdout());
+        progress_bar.tick();
+        std::io::stdout().flush().ok();
 
         // Build command for PS3Dec: PS3Dec d key <key> <input> <output>
         let mut command = Command::new(&decryptor_path);
@@ -71,6 +76,7 @@ impl Decryptor {
         let max_stalled = 20; // 10 seconds
         let start_time = std::time::Instant::now();
 
+        let mut used_spinner = false;
         // Progress bar loop
         loop {
             // Check if process has exited
@@ -83,9 +89,11 @@ impl Decryptor {
                     }
                     if status.success() {
                         progress_bar.finish_with_message("Decryption completed");
+                        std::io::stdout().flush().ok();
                         break;
                     } else {
                         progress_bar.abandon_with_message("Decryption failed");
+                        std::io::stdout().flush().ok();
                         let stderr = status.code().map(|c| format!("Exit code: {}", c)).unwrap_or_else(|| "Unknown error".to_string());
                         anyhow::bail!("PS3Dec failed: {}", stderr);
                     }
@@ -102,11 +110,25 @@ impl Decryptor {
                         }
                         last_size = size;
                         if stalled_count > max_stalled {
-                            progress_bar.println("Warning: Decryption appears stalled. Output file size is not growing.");
+                            if !used_spinner {
+                                progress_bar.println("Warning: Decryption appears stalled. Output file size is not growing. Showing spinner instead.");
+                                progress_bar.abandon_with_message("Decryption appears stalled");
+                                let spinner = ProgressBar::new_spinner();
+                                spinner.set_style(
+                                    ProgressStyle::default_spinner()
+                                        .template("{spinner:.green} Decrypting... {elapsed_precise}")
+                                        .unwrap()
+                                        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+                                );
+                                spinner.set_draw_target(ProgressDrawTarget::stdout());
+                                spinner.enable_steady_tick(Duration::from_millis(120));
+                                used_spinner = true;
+                            }
                         }
                     }
                     if start_time.elapsed() > timeout_duration {
                         progress_bar.abandon_with_message("Decryption timed out");
+                        std::io::stdout().flush().ok();
                         let _ = child.kill().await;
                         anyhow::bail!("Decryption timed out after {} seconds", self.config.decryption_timeout);
                     }
@@ -124,8 +146,8 @@ impl Decryptor {
         } else {
             anyhow::bail!("Decryption failed: Output file was not created.");
         }
-
         println!("PS3 ISO decryption completed successfully");
+        std::io::stdout().flush().ok();
         Ok(())
     }
 
