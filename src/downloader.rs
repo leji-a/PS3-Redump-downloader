@@ -102,8 +102,10 @@ impl Downloader {
                     if path.extension() == Some(OsStr::new("iso")) && !path.file_name().unwrap_or_default().to_string_lossy().contains("encrypted") {
                         // Rename to the expected encrypted name
                         if path != expected_encrypted {
-                            println!("Renaming extracted ISO: {:?} -> {:?}", path, expected_encrypted);
-                            let _ = fs::rename(&path, &expected_encrypted);
+                            // Attempt to rename the file; log error if it fails
+                            if let Err(e) = fs::rename(&path, &expected_encrypted) {
+                                println!("Error renaming extracted ISO: {} -> {}: {}", path.display(), expected_encrypted.display(), e);
+                            }
                         }
                         break;
                     }
@@ -433,6 +435,7 @@ impl Downloader {
 
     /// Removes a file, printing an error if it fails.
     fn remove_file(&self, file_path: &Path) -> Result<()> {
+        // Attempt to remove the file; log error if it fails
         match fs::remove_file(file_path) {
             Ok(_) => Ok(()),
             Err(e) => {

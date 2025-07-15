@@ -70,6 +70,7 @@ async fn run_main_loop(
                 downloader.download_ps3_element(selected_game).await?;
             } else {
                 println!("Number not in valid range (1-{})\n", filtered_games.len());
+                println!("Please try again..."); // Added user prompt for better UX
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             }
         }
