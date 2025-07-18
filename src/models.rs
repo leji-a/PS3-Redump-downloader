@@ -75,15 +75,11 @@ impl Game {
         self.clean_title()
     }
 
-    /// Returns the output ISO filename in the format regioncode-nameofgame.iso
+    /// Returns the output ISO filename in the format gamename.iso
     pub fn output_iso_filename(&self) -> String {
         let clean = self.clean_title();
-        // Split at the first space or dash to get region code
-        let mut parts = clean.splitn(2, |c: char| c == ' ' || c == '-');
-        let region = parts.next().unwrap_or("").to_lowercase();
-        let rest = parts.next().unwrap_or("").trim();
         // Extract main game name (up to first parenthesis or end)
-        let main_name = rest
+        let main_name = clean
             .split('(')
             .next()
             .unwrap_or("")
@@ -92,11 +88,6 @@ impl Game {
             .replace("__", "_")
             .trim_matches('_')
             .to_lowercase();
-        if !region.is_empty() && !main_name.is_empty() {
-            format!("{}-{}.iso", region, main_name)
-        } else {
-            // fallback to cleaned title
-            format!("{}.iso", clean.replace([' ', '-', '(', ')', ','], "_").to_lowercase())
-        }
+        format!("{}.iso", main_name)
     }
 }

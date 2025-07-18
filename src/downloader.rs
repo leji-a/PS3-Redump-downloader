@@ -75,7 +75,7 @@ impl Downloader {
 
         let new_file_name = format!("{}.zip", game.clean_title());
         let tmp_file = self.config.tmp_iso_folder_path().join(&new_file_name);
-        let encrypted_file_name = format!("{}_encrypted.iso", game.clean_title());
+        let encrypted_file_name = format!("{}.iso", game.clean_title());
         let encrypted_file_path = self.config.tmp_iso_folder_path().join(&encrypted_file_name);
 
         if self.config.external_iso_download {
@@ -90,17 +90,17 @@ impl Downloader {
             self.unzip_file(&tmp_file).await?;
             self.remove_file(&tmp_file)?;
 
-            // After extraction, find the ISO and rename it to regioncode-nameofgame_encrypted.iso
+            // After extraction, find the ISO and rename it to gamename.iso
             use std::fs;
             use std::ffi::OsStr;
             let dest = self.config.tmp_iso_folder_path();
-            let expected_encrypted = dest.join(format!("{}_encrypted.iso", game.output_iso_filename().trim_end_matches(".iso")));
+            let expected_encrypted = dest.join(game.output_iso_filename());
             // Find the first .iso file in the folder (should be the extracted one)
             if let Ok(entries) = fs::read_dir(&dest) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension() == Some(OsStr::new("iso")) && !path.file_name().unwrap_or_default().to_string_lossy().contains("encrypted") {
-                        // Rename to the expected encrypted name
+                    if path.extension() == Some(OsStr::new("iso")) {
+                        // Rename to the expected name if needed
                         if path != expected_encrypted {
                             // Attempt to rename the file; log error if it fails
                             if let Err(e) = fs::rename(&path, &expected_encrypted) {
