@@ -10,8 +10,9 @@ async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
-    // Load configuration
-    let config = Config::load("config.ini")?;
+    // Load configuration (searches or creates in recommended locations)
+    let (config, config_path) = Config::load_or_create()?;
+    println!("Using config file at: {}", config_path.display());
 
     // Setup working folders
     setup_folders(&config)?;

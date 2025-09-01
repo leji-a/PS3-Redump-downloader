@@ -3,11 +3,68 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
+use std::fs::File;
 use std::path::Path;
 use std::io::{Read, Write};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncSeekExt, SeekFrom, AsyncWriteExt};
 use zip::ZipArchive;
+
+/// Minimal PARAM.SFO parser
+mod sfo {
+    use std::collections::HashMap;
+
+    pub struct Sfo {
+        pub entries: HashMap<String, String>,
+    }
+
+    impl Sfo {
+        pub fn from_bytes(data: &[u8]) -> Option<Self> {
+            if data.len() < 20 || &data[0..4] != b"\0PSF" {
+                return None;
+            }
+
+            let key_table_start = u32::from_le_bytes(data[8..12].try_into().ok()?) as usize;
+            let data_table_start = u32::from_le_bytes(data[12..16].try_into().ok()?) as usize;
+            let count = u32::from_le_bytes(data[16..20].try_into().ok()?) as usize;
+
+            let mut entries = HashMap::new();
+            let mut offset = 20;
+
+            for _ in 0..count {
+                let key_offset = u16::from_le_bytes(data[offset..offset + 2].try_into().ok()?) as usize;
+                let data_fmt = u16::from_le_bytes(data[offset + 2..offset + 4].try_into().ok()?) as u32;
+                let data_len = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().ok()?) as usize;
+                let data_offset = u32::from_le_bytes(data[offset + 12..offset + 16].try_into().ok()?) as usize;
+                offset += 16;
+
+                let key_end = data[key_table_start + key_offset..]
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(0);
+                let key = String::from_utf8_lossy(
+                    &data[key_table_start + key_offset..key_table_start + key_offset + key_end],
+                )
+                .to_string();
+
+                let value_offset = data_table_start + data_offset;
+                let value_bytes = &data[value_offset..value_offset + data_len];
+
+                if data_fmt == 516 {
+                    if let Ok(val) = String::from_utf8(value_bytes.to_vec()) {
+                        entries.insert(key, val.trim_end_matches('\0').to_string());
+                    }
+                }
+            }
+
+            Some(Sfo { entries })
+        }
+
+        pub fn get(&self, key: &str) -> Option<&String> {
+            self.entries.get(key)
+        }
+    }
+}
 
 /// Downloader handles downloading, extracting, and decrypting PS3 ISO files.
 pub struct Downloader {
@@ -91,20 +148,15 @@ impl Downloader {
             self.remove_file(&tmp_file)?;
 
             // After extraction, find the ISO and rename it to gamename.iso
-            use std::fs;
             use std::ffi::OsStr;
             let dest = self.config.tmp_iso_folder_path();
-            let expected_encrypted = dest.join(game.output_iso_filename());
-            // Find the first .iso file in the folder (should be the extracted one)
             if let Ok(entries) = fs::read_dir(&dest) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension() == Some(OsStr::new("iso")) {
-                        // Rename to the expected name if needed
-                        if path != expected_encrypted {
-                            // Attempt to rename the file; log error if it fails
-                            if let Err(e) = fs::rename(&path, &expected_encrypted) {
-                                println!("Error renaming extracted ISO: {} -> {}: {}", path.display(), expected_encrypted.display(), e);
+                        if path != encrypted_file_path {
+                            if let Err(e) = fs::rename(&path, &encrypted_file_path) {
+                                println!("Error renaming extracted ISO: {} -> {}: {}", path.display(), encrypted_file_path.display(), e);
                             }
                         }
                         break;
@@ -116,12 +168,72 @@ impl Downloader {
         // Decrypt the extracted ISO with the key
         if encrypted_file_path.exists() {
             self.decryptor.decrypt_iso(&encrypted_file_path, &decrypted_file_path, key).await?;
-            
-            // Clean up encrypted file after successful decryption
             self.remove_file(&encrypted_file_path)?;
+
+            // 🔥 New functionality: rename ISO using PARAM.SFO with fallback
+            self.rename_iso_with_param_sfo(&decrypted_file_path)?;
         }
 
         println!(" ");
+        Ok(())
+    }
+
+    /// Extracts TITLE_ID and TITLE from decrypted ISO and renames the file.
+    /// Falls back to old naming if PARAM.SFO can't be read.
+    fn rename_iso_with_param_sfo(&self, iso_path: &Path) -> Result<()> {
+        let tmp_folder = self.config.tmp_iso_folder_path();
+        let param_sfo_path = tmp_folder.join("PARAM.SFO");
+
+        // Try to extract PARAM.SFO with 7z
+        let status = std::process::Command::new("7z")
+            .args([
+                "e",
+                iso_path.to_str().unwrap(),
+                "PS3_GAME/PARAM.SFO",
+                &format!("-o{}", tmp_folder.display()),
+                "-y",
+            ])
+            .status();
+
+        if let Ok(status) = status {
+            if !status.success() || !param_sfo_path.exists() {
+                println!("⚠️ Could not extract PARAM.SFO, keeping original filename.");
+                return Ok(()); // fallback
+            }
+        } else {
+            println!("⚠️ Failed to run 7z, keeping original filename.");
+            return Ok(()); // fallback
+        }
+
+        // Try parsing PARAM.SFO
+        let mut buf = Vec::new();
+        File::open(&param_sfo_path)?.read_to_end(&mut buf)?;
+        let param = match sfo::Sfo::from_bytes(&buf) {
+            Some(p) => p,
+            None => {
+                println!("⚠️ Invalid PARAM.SFO, keeping original filename.");
+                let _ = fs::remove_file(&param_sfo_path);
+                return Ok(()); // fallback
+            }
+        };
+
+        let title_id = param.get("TITLE_ID").cloned().unwrap_or("UNKNOWN".into());
+        let title = param.get("TITLE").cloned().unwrap_or("Unknown".into());
+
+        let safe_title = title
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect::<String>();
+
+        let new_name = format!("{}-{}.iso", title_id, safe_title);
+        let new_path = iso_path.parent().unwrap().join(&new_name);
+
+        if iso_path != new_path {
+            fs::rename(&iso_path, &new_path)?;
+            println!("✅ Renamed ISO to {}", new_path.display());
+        }
+
+        let _ = fs::remove_file(&param_sfo_path);
         Ok(())
     }
 

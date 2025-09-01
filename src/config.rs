@@ -78,6 +78,96 @@ impl Config {
         Ok(config)
     }
 
+    /// Loads configuration from the recommended locations, or creates a default config if not found.
+    pub fn load_or_create() -> Result<(Self, std::path::PathBuf)> {
+        use std::path::PathBuf;
+        use std::fs;
+        use std::io::Write;
+
+        // List of config paths to try, in order
+        let mut candidates = Vec::new();
+        // 1. Current directory
+        candidates.push(PathBuf::from("config.ini"));
+
+        #[cfg(windows)]
+        {
+            if let Some(appdata) = std::env::var_os("APPDATA") {
+                candidates.push(PathBuf::from(appdata).join("ps3-redump-downloader/config.ini"));
+            }
+            candidates.push(PathBuf::from("C:/ProgramData/ps3-redump-downloader/config.ini"));
+        }
+        #[cfg(not(windows))]
+        {
+            if let Some(home) = std::env::var_os("HOME") {
+                candidates.push(PathBuf::from(home).join(".config/ps3-redump-downloader/config.ini"));
+            }
+            candidates.push(PathBuf::from("/etc/ps3-redump-downloader/config.ini"));
+        }
+
+        // Try to load from each candidate
+        for path in &candidates {
+            if path.exists() {
+                match Self::load(path.to_str().unwrap()) {
+                    Ok(cfg) => return Ok((cfg, path.clone())),
+                    Err(e) => eprintln!("Failed to load config from {}: {}", path.display(), e),
+                }
+            }
+        }
+
+        // Not found: create default config in user config dir
+        #[cfg(windows)]
+        let default_path = {
+            if let Some(appdata) = std::env::var_os("APPDATA") {
+                PathBuf::from(appdata).join("ps3-redump-downloader/config.ini")
+            } else {
+                PathBuf::from("config.ini")
+            }
+        };
+        #[cfg(not(windows))]
+        let default_path = {
+            if let Some(home) = std::env::var_os("HOME") {
+                PathBuf::from(home).join(".config/ps3-redump-downloader/config.ini")
+            } else {
+                PathBuf::from("config.ini")
+            }
+        };
+
+        // Ensure parent directory exists
+        if let Some(parent) = default_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+
+        // Default config contents (from README.md)
+        let default_config = r#"[url]
+PS3_ISO = https://myrient.erista.me/files/Redump/Sony%20-%20PlayStation%203/
+PS3_KEYS = https://myrient.erista.me/files/Redump/Sony%20-%20PlayStation%203%20-%20Disc%20Keys%20TXT/
+
+[Download]
+LIST_PS3_FILES_JSON_NAME = listPS3Titles.json
+EXTERNAL_ISO = 0
+MAX_RETRIES = 10
+DELAY_BETWEEN_RETRIES = 10
+TIMEOUT_REQUEST = 1800
+
+[folder]
+TMP_FOLDER_NAME = ~/PS3-Games
+TMP_ISO_FOLDER_NAME = iso_files
+
+[PS3]
+DECRYPTOR_PATH = /path/to/PS3Dec
+DECRYPTION_TIMEOUT = 300
+"#;
+        let mut file = fs::File::create(&default_path)
+            .map_err(|e| anyhow::anyhow!("Failed to create default config at {}: {}", default_path.display(), e))?;
+        file.write_all(default_config.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Failed to write default config at {}: {}", default_path.display(), e))?;
+        eprintln!("No config.ini found. Created a default config at {}. Please edit it as needed.", default_path.display());
+
+        // Now load the config
+        let cfg = Self::load(default_path.to_str().unwrap())?;
+        Ok((cfg, default_path))
+    }
+
     /// Expands a path that starts with ~ to the user's home directory.
     fn expand_tilde(path: &str) -> std::path::PathBuf {
         if path.starts_with("~/") {
