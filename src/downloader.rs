@@ -126,7 +126,8 @@ impl Downloader {
     async fn download_extract_and_decrypt(&self, link: &str, game: &Game, key: &str) -> Result<()> {
         println!(" # PS3 ISO file...");
 
-        let tmp_folder = self.config.tmp_iso_folder_path();
+        let tmp_folder = self.config.tmp_iso_folder_path().join(game.clean_title());
+        fs::create_dir_all(&tmp_folder)?;
 
         // --- NEW: clear temp folder to avoid leftovers from previous games ---
         if tmp_folder.exists() {
