@@ -1,13 +1,13 @@
-use crate::{config::Config, models::Game, decryptor::Decryptor};
+use crate::{config::Config, decryptor::Decryptor, models::Game};
 use anyhow::Result;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::fs::File;
-use std::path::Path;
 use std::io::{Read, Write};
+use std::path::Path;
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncSeekExt, SeekFrom, AsyncWriteExt};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use zip::ZipArchive;
 
 /// Minimal PARAM.SFO parser
@@ -32,10 +32,14 @@ mod sfo {
             let mut offset = 20;
 
             for _ in 0..count {
-                let key_offset = u16::from_le_bytes(data[offset..offset + 2].try_into().ok()?) as usize;
-                let data_fmt = u16::from_le_bytes(data[offset + 2..offset + 4].try_into().ok()?) as u32;
-                let data_len = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().ok()?) as usize;
-                let data_offset = u32::from_le_bytes(data[offset + 12..offset + 16].try_into().ok()?) as usize;
+                let key_offset =
+                    u16::from_le_bytes(data[offset..offset + 2].try_into().ok()?) as usize;
+                let data_fmt =
+                    u16::from_le_bytes(data[offset + 2..offset + 4].try_into().ok()?) as u32;
+                let data_len =
+                    u32::from_le_bytes(data[offset + 4..offset + 8].try_into().ok()?) as usize;
+                let data_offset =
+                    u32::from_le_bytes(data[offset + 12..offset + 16].try_into().ok()?) as usize;
                 offset += 16;
 
                 let key_end = data[key_table_start + key_offset..]
@@ -92,17 +96,18 @@ impl Downloader {
         // Download the key for this game
         println!("Downloading decryption key...");
         let key = self.decryptor.key_manager().find_key_for_game(game).await?;
-        
+
         if key.is_none() {
             anyhow::bail!("Could not find decryption key for game: {}. The game may not be available or the key may not exist.", title);
         }
-        
+
         let key = key.unwrap();
         println!("Found decryption key for {}", title);
 
         // Construct the full URL by combining base URL with relative path
         let full_url = format!("{}{}", self.config.ps3_iso_url, game.link);
-        self.download_extract_and_decrypt(&full_url, game, &key).await?;
+        self.download_extract_and_decrypt(&full_url, game, &key)
+            .await?;
         println!("\n{} downloaded and decrypted :)", title);
 
         // Open the folder containing the decrypted ISO
@@ -121,8 +126,17 @@ impl Downloader {
     async fn download_extract_and_decrypt(&self, link: &str, game: &Game, key: &str) -> Result<()> {
         println!(" # PS3 ISO file...");
 
+        let tmp_folder = self.config.tmp_iso_folder_path();
+
+        // --- NEW: clear temp folder to avoid leftovers from previous games ---
+        if tmp_folder.exists() {
+            fs::remove_dir_all(&tmp_folder)?;
+        }
+        fs::create_dir_all(&tmp_folder)?;
+        // -------------------------------------------------------------
+
         let decrypted_file_name = game.output_iso_filename();
-        let decrypted_file_path = self.config.tmp_iso_folder_path().join(&decrypted_file_name);
+        let decrypted_file_path = tmp_folder.join(&decrypted_file_name);
 
         // Skip download if file already exists
         if decrypted_file_path.exists() {
@@ -131,9 +145,9 @@ impl Downloader {
         }
 
         let new_file_name = format!("{}.zip", game.clean_title());
-        let tmp_file = self.config.tmp_iso_folder_path().join(&new_file_name);
+        let tmp_file = tmp_folder.join(&new_file_name);
         let encrypted_file_name = format!("{}.iso", game.clean_title());
-        let encrypted_file_path = self.config.tmp_iso_folder_path().join(&encrypted_file_name);
+        let encrypted_file_path = tmp_folder.join(&encrypted_file_name);
 
         if self.config.external_iso_download {
             self.download_using_navigator(link, &new_file_name, &tmp_file, &encrypted_file_name)
@@ -149,14 +163,18 @@ impl Downloader {
 
             // After extraction, find the ISO and rename it to gamename.iso
             use std::ffi::OsStr;
-            let dest = self.config.tmp_iso_folder_path();
-            if let Ok(entries) = fs::read_dir(&dest) {
+            if let Ok(entries) = fs::read_dir(&tmp_folder) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension() == Some(OsStr::new("iso")) {
                         if path != encrypted_file_path {
                             if let Err(e) = fs::rename(&path, &encrypted_file_path) {
-                                println!("Error renaming extracted ISO: {} -> {}: {}", path.display(), encrypted_file_path.display(), e);
+                                println!(
+                                    "Error renaming extracted ISO: {} -> {}: {}",
+                                    path.display(),
+                                    encrypted_file_path.display(),
+                                    e
+                                );
                             }
                         }
                         break;
@@ -167,10 +185,12 @@ impl Downloader {
 
         // Decrypt the extracted ISO with the key
         if encrypted_file_path.exists() {
-            self.decryptor.decrypt_iso(&encrypted_file_path, &decrypted_file_path, key).await?;
+            self.decryptor
+                .decrypt_iso(&encrypted_file_path, &decrypted_file_path, key)
+                .await?;
             self.remove_file(&encrypted_file_path)?;
 
-            // 🔥 New functionality: rename ISO using PARAM.SFO with fallback
+            // Rename ISO using PARAM.SFO with fallback
             self.rename_iso_with_param_sfo(&decrypted_file_path)?;
         }
 
@@ -251,11 +271,17 @@ impl Downloader {
                 if file_path.exists() {
                     first_byte = fs::metadata(file_path)?.len();
                     if first_byte >= size {
-                        println!("The file {} was downloaded previously.", file_path.display());
+                        println!(
+                            "The file {} was downloaded previously.",
+                            file_path.display()
+                        );
                         return Ok(());
                     }
                 }
-                headers.insert("Range", format!("bytes={}-{}", first_byte, size - 1).parse()?);
+                headers.insert(
+                    "Range",
+                    format!("bytes={}-{}", first_byte, size - 1).parse()?,
+                );
             }
 
             // Print the message before creating the progress bar
@@ -337,7 +363,10 @@ impl Downloader {
                         if error_occurred {
                             retries += 1;
                             if retries < self.config.max_retries {
-                                println!("Waiting {} seconds before retry...", self.config.delay_between_retries);
+                                println!(
+                                    "Waiting {} seconds before retry...",
+                                    self.config.delay_between_retries
+                                );
                                 tokio::time::sleep(tokio::time::Duration::from_secs(
                                     self.config.delay_between_retries,
                                 ))
@@ -347,12 +376,21 @@ impl Downloader {
                         }
                         break;
                     } else {
-                        println!("HTTP error: {} - {}", response.status(), response.status().as_str());
+                        println!(
+                            "HTTP error: {} - {}",
+                            response.status(),
+                            response.status().as_str()
+                        );
                         retries += 1;
                     }
                 }
                 Err(e) => {
-                    println!("Request error (attempt {}/{}): {}", retries + 1, self.config.max_retries, e);
+                    println!(
+                        "Request error (attempt {}/{}): {}",
+                        retries + 1,
+                        self.config.max_retries,
+                        e
+                    );
                     retries += 1;
                 }
             }
@@ -413,7 +451,7 @@ impl Downloader {
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;
-            
+
         let response = client.get(link).header("Range", "bytes=0-1").send().await?;
 
         if let Some(range_header) = response.headers().get("content-range") {
